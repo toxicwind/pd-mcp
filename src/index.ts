@@ -15,7 +15,7 @@ import { executeNuclei } from "./tools/nuclei.js";
 import { executeTlsx } from "./tools/tlsx.js";
 import { executeShuffledns } from "./tools/shuffledns.js";
 import { runBugBountyWorkflow } from "./workflows/bug-bounty.js";
-import { cleanDomain, cleanList } from "./tools/runner.js";
+import { cleanDomain, cleanList, withHeavyGate, checkAllBinaries } from "./tools/runner.js";
 
 // ProjectDiscovery MCP server — estate-hardened fork of
 // intelligent-ears/pd-tools-mcp (MIT).
@@ -128,8 +128,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             targets: { type: "array", items: { type: "string" }, description: "List of targets to scan" },
             templateIds: { type: "array", items: { type: "string" }, description: "Nuclei template IDs to run (e.g. http-missing-security-headers)" },
             severity: { type: "array", items: { type: "string" }, description: "Filter by severity (critical, high, medium, low, info)" },
+            confirm: { type: "boolean", description: "MUST be true - nuclei is destructive-gated" },
           },
-          required: ["targets"],
+          required: ["targets", "confirm"],
         },
       },
       {
@@ -204,7 +205,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "naabu": {
         const scanType = a.scanType === "s" ? "s" : "c";
         return toolResult(
-          await executeNaabu(cleanList(a.hosts), a.ports, a.topPorts, scanType)
+          await withHeavyGate("naabu", () =>
+            executeNaabu(cleanList(a.hosts), a.ports, a.topPorts, scanType)
+          )
         );
       }
 
@@ -221,8 +224,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "nuclei": {
+        // Destructive gate (grafted from estate pd-mcp): explicit opt-in required.
+        if (a.confirm !== true) {
+          throw new Error(
+            "nuclei is destructive-gated: pass confirm:true to actually scan."
+          );
+        }
         return toolResult(
-          await executeNuclei(cleanList(a.targets), a.templateIds, a.severity)
+          await withHeavyGate("nuclei", () =>
+            executeNuclei(cleanList(a.targets), a.templateIds, a.severity)
+          )
         );
       }
 
@@ -235,7 +246,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("domain and wordlist must be strings");
         }
         return toolResult(
-          await executeShuffledns(cleanDomain(a.domain), a.wordlist, cleanList(a.resolvers))
+          await withHeavyGate("shuffledns", () =>
+            executeShuffledns(cleanDomain(a.domain), a.wordlist, cleanList(a.resolvers))
+          )
         );
       }
 
@@ -269,6 +282,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Start the server
 async function main() {
+  // Fail fast if binaries are missing (grafted from estate pd-mcp).
+  checkAllBinaries();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("ProjectDiscovery MCP Server running on stdio");

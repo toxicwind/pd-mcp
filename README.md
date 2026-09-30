@@ -22,6 +22,14 @@ Fork of `intelligent-ears/pd-tools-mcp` (MIT), adapted for the toxicwind estate.
 - **httpx**: replaced the headless-chrome `screenshot` flag with `techDetect`
   (wappalyzer).
 - Kept upstream's `bug_bounty_workflow` composite tool (now timeout-safe).
+- **Nuclei destructive gate** — `nuclei` requires `confirm: true` in the tool
+  arguments. Without it the call is refused with a clear error. Vulnerability
+  scanning is an active, potentially intrusive operation; the gate forces
+  explicit opt-in on every invocation.
+- **Heavy-scan concurrency gate** — `naabu`, `nuclei`, and `shuffledns` share a
+  2-slot semaphore. Extra heavy scans queue instead of stampeding the host.
+- **Startup binary check** — the server validates all 8 binaries at launch and
+  exits with a clear message naming what's missing, instead of failing mid-call.
 
 ## Tools
 

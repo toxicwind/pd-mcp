@@ -175,3 +175,76 @@ export function parseJsonl<T>(lines: string[], pick: (o: any) => T | null): T[] 
 export function ok<T>(payload: T): { ok: true } & { result: T } {
   return { ok: true, result: payload };
 }
+// ---------------------------------------------------------------------------
+// Heavy-scan concurrency gate (grafted from estate pd-mcp server.ts).
+// Port/vuln/mass-bruteforce scans share a 2-slot cap; extras queue.
+// ---------------------------------------------------------------------------
+const HEAVY_TOOLS = new Set(["naabu", "nuclei", "shuffledns"]);
+const HEAVY_LIMIT = 2;
+
+class Semaphore {
+  private running = 0;
+  private queue: Array<() => void> = [];
+  constructor(private max: number) {}
+  async acquire(): Promise<void> {
+    if (this.running < this.max) {
+      this.running++;
+      return;
+    }
+    await new Promise<void>((res) => this.queue.push(res));
+    this.running++;
+  }
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+const heavySem = new Semaphore(HEAVY_LIMIT);
+
+export function isHeavyTool(name: string): boolean {
+  return HEAVY_TOOLS.has(name);
+}
+
+/** Run fn under the heavy-scan gate if name is a heavy tool. */
+export async function withHeavyGate<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  if (!isHeavyTool(name)) return fn();
+  await heavySem.acquire();
+  try {
+    return await fn();
+  } finally {
+    heavySem.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Startup binary check (grafted from estate pd-mcp server.ts).
+// Fail fast at launch with a clear message instead of failing mid-call.
+// ---------------------------------------------------------------------------
+const ALL_BINARIES = [
+  "httpx",
+  "dnsx",
+  "shuffledns",
+  "subfinder",
+  "naabu",
+  "nuclei",
+  "katana",
+  "tlsx",
+];
+
+export function checkAllBinaries(): void {
+  const missing: string[] = [];
+  for (const name of ALL_BINARIES) {
+    try {
+      resolveBinary(name);
+    } catch (err) {
+      missing.push(name + ": " + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      "pd-mcp startup: " + missing.length + " binaries missing:\n  " + missing.join("\n  ")
+    );
+  }
+}
