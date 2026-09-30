@@ -1,7 +1,7 @@
 {
   "name": "projectdiscovery-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP server for ProjectDiscovery tools integration - automated bug bounty reconnaissance",
+  "version": "1.1.0",
+  "description": "MCP server for ProjectDiscovery tools \u2014 estate-hardened fork (toxicwind/pd-mcp): absolute binary paths, timeouts, input validation, tlsx + shuffledns",
   "type": "module",
   "bin": {
     "projectdiscovery-mcp": "./build/index.js"
@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc && chmod +x build/index.js",
     "dev": "tsc --watch",
-    "start": "node build/index.js"
+    "start": "bun src/index.ts"
   },
   "keywords": [
     "mcp",

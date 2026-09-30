@@ -12,13 +12,21 @@ import { executeNaabu } from "./tools/naabu.js";
 import { executeHttpx } from "./tools/httpx.js";
 import { executeKatana } from "./tools/katana.js";
 import { executeNuclei } from "./tools/nuclei.js";
+import { executeTlsx } from "./tools/tlsx.js";
+import { executeShuffledns } from "./tools/shuffledns.js";
 import { runBugBountyWorkflow } from "./workflows/bug-bounty.js";
+import { cleanDomain, cleanList } from "./tools/runner.js";
 
-// Create MCP server instance
+// ProjectDiscovery MCP server — estate-hardened fork of
+// intelligent-ears/pd-tools-mcp (MIT).
+// Binaries resolve via PD_TOOLS_DIR (/home/toxic/.pdtm/go/bin) and
+// SHUFFLEDNS_BIN (/home/toxic/go/bin/shuffledns); per-binary override
+// PD_<NAME>_BIN. All spawns are absolute-path argv, no shell, with timeouts.
+
 const server = new Server(
   {
     name: "projectdiscovery-mcp",
-    version: "1.0.0",
+    version: "1.1.0",
   },
   {
     capabilities: {
@@ -26,6 +34,20 @@ const server = new Server(
     },
   }
 );
+
+function toolResult(result: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+  };
+}
+
+function toolError(name: string, err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return {
+    content: [{ type: "text" as const, text: `Error executing ${name}: ${msg}` }],
+    isError: true,
+  };
+}
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -37,14 +59,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            domain: {
-              type: "string",
-              description: "Target domain (e.g., example.com)",
-            },
-            silent: {
-              type: "boolean",
-              description: "Show only subdomains in output",
-            },
+            domain: { type: "string", description: "Target domain (e.g., example.com)" },
+            silent: { type: "boolean", description: "Show only subdomains in output" },
           },
           required: ["domain"],
         },
@@ -55,15 +71,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            domains: {
-              type: "array",
-              items: { type: "string" },
-              description: "List of domains to resolve",
-            },
-            recordType: {
-              type: "string",
-              description: "DNS record type (A, AAAA, CNAME, etc.)",
-            },
+            domains: { type: "array", items: { type: "string" }, description: "List of domains to resolve" },
+            recordType: { type: "string", description: "DNS record type (A, AAAA, CNAME, etc.)" },
+            resolvers: { type: "array", items: { type: "string" }, description: "Custom DNS resolvers (e.g. 8.8.8.8)" },
           },
           required: ["domains"],
         },
@@ -74,19 +84,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            hosts: {
-              type: "array",
-              items: { type: "string" },
-              description: "List of hosts to scan",
-            },
-            ports: {
-              type: "string",
-              description: "Ports to scan (e.g., '80,443' or '1-1000')",
-            },
-            topPorts: {
-              type: "number",
-              description: "Scan top N ports",
-            },
+            hosts: { type: "array", items: { type: "string" }, description: "List of hosts to scan" },
+            ports: { type: "string", description: "Ports to scan (e.g., '80,443' or '1-1000')" },
+            topPorts: { type: "number", description: "Scan top N ports (default 100, max 1000)" },
+            scanType: { type: "string", description: "c = connect scan (unprivileged, default), s = SYN scan (needs root)" },
           },
           required: ["hosts"],
         },
@@ -97,19 +98,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            urls: {
-              type: "array",
-              items: { type: "string" },
-              description: "List of URLs or hosts to probe",
-            },
-            followRedirects: {
-              type: "boolean",
-              description: "Follow HTTP redirects",
-            },
-            screenshot: {
-              type: "boolean",
-              description: "Take screenshots",
-            },
+            urls: { type: "array", items: { type: "string" }, description: "List of URLs or hosts to probe" },
+            followRedirects: { type: "boolean", description: "Follow HTTP redirects" },
+            techDetect: { type: "boolean", description: "Enable technology detection (wappalyzer)" },
           },
           required: ["urls"],
         },
@@ -120,19 +111,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            urls: {
-              type: "array",
-              items: { type: "string" },
-              description: "List of URLs to crawl",
-            },
-            depth: {
-              type: "number",
-              description: "Crawl depth (default: 2)",
-            },
-            scope: {
-              type: "string",
-              description: "Crawl scope (e.g., regex pattern)",
-            },
+            urls: { type: "array", items: { type: "string" }, description: "List of URLs to crawl" },
+            depth: { type: "number", description: "Crawl depth (default: 2, max: 5)" },
+            scope: { type: "string", description: "Field scope filter (e.g., dn, rdn)" },
+            maxDurationSeconds: { type: "number", description: "Max crawl duration in seconds (max 600)" },
           },
           required: ["urls"],
         },
@@ -143,24 +125,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            targets: {
-              type: "array",
-              items: { type: "string" },
-              description: "List of targets to scan",
-            },
-            templates: {
-              type: "array",
-              items: { type: "string" },
-              description: "Specific templates to use",
-            },
-            severity: {
-              type: "array",
-              items: { type: "string" },
-              description:
-                "Filter by severity (critical, high, medium, low, info)",
-            },
+            targets: { type: "array", items: { type: "string" }, description: "List of targets to scan" },
+            templateIds: { type: "array", items: { type: "string" }, description: "Nuclei template IDs to run (e.g. http-missing-security-headers)" },
+            severity: { type: "array", items: { type: "string" }, description: "Filter by severity (critical, high, medium, low, info)" },
           },
           required: ["targets"],
+        },
+      },
+      {
+        name: "tlsx",
+        description: "Probe TLS/SSL configuration: versions, ciphers, cert expiry, self-signed, wildcard",
+        inputSchema: {
+          type: "object",
+          properties: {
+            hosts: { type: "array", items: { type: "string" }, description: "List of hosts to probe" },
+            port: { type: "number", description: "TLS port (default: 443)" },
+          },
+          required: ["hosts"],
+        },
+      },
+      {
+        name: "shuffledns",
+        description: "Active subdomain brute-forcing with a wordlist",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string", description: "Target domain (e.g., example.com)" },
+            wordlist: { type: "string", description: "Absolute path to wordlist file on the MCP host" },
+            resolvers: { type: "array", items: { type: "string" }, description: "Custom DNS resolvers" },
+          },
+          required: ["domain", "wordlist"],
         },
       },
       {
@@ -170,52 +164,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            domain: {
-              type: "string",
-              description: "Target domain for bug bounty reconnaissance",
-            },
-            portScan: {
-              type: "boolean",
-              description: "Include port scanning (default: true)",
-            },
-            crawl: {
-              type: "boolean",
-              description: "Include web crawling (default: true)",
-            },
-            vulnerabilityScan: {
-              type: "boolean",
-              description: "Include vulnerability scanning (default: true)",
-            },
-            severityFilter: {
-              type: "array",
-              items: { type: "string" },
-              description:
-                "Nuclei severity filter (critical, high, medium, low)",
-            },
-            maxCrawlUrls: {
-              type: "number",
-              description: "Maximum URLs to crawl (default: 10)",
-            },
-            maxScanUrls: {
-              type: "number",
-              description: "Maximum URLs to scan with Nuclei (default: 20)",
-            },
-            maxTopPorts: {
-              type: "number",
-              description: "Maximum top ports for Naabu (default: 100)",
-            },
-            batchSize: {
-              type: "number",
-              description: "Batch size for DNS/HTTP requests (default: 50)",
-            },
-            delayBetweenBatches: {
-              type: "number",
-              description: "Delay in milliseconds between batches (default: 1000)",
-            },
-            crawlDepth: {
-              type: "number",
-              description: "Crawl depth for Katana (default: 2)",
-            },
+            domain: { type: "string", description: "Target domain for bug bounty reconnaissance" },
+            portScan: { type: "boolean", description: "Include port scanning (default: true)" },
+            crawl: { type: "boolean", description: "Include web crawling (default: true)" },
+            vulnerabilityScan: { type: "boolean", description: "Include vulnerability scanning (default: true)" },
+            severityFilter: { type: "array", items: { type: "string" }, description: "Nuclei severity filter (critical, high, medium, low)" },
+            maxCrawlUrls: { type: "number", description: "Maximum URLs to crawl (default: 10)" },
+            maxScanUrls: { type: "number", description: "Maximum URLs to scan with Nuclei (default: 20)" },
+            maxTopPorts: { type: "number", description: "Maximum top ports for Naabu (default: 100)" },
+            batchSize: { type: "number", description: "Batch size for DNS/HTTP requests (default: 50)" },
+            delayBetweenBatches: { type: "number", description: "Delay in milliseconds between batches (default: 1000)" },
+            crawlDepth: { type: "number", description: "Crawl depth for Katana (default: 2)" },
           },
           required: ["domain"],
         },
@@ -227,170 +186,84 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  const a = (args ?? {}) as Record<string, any>;
 
   try {
     switch (name) {
       case "subfinder": {
-        const { domain, silent } = args as { domain: string; silent?: boolean };
-        const result = await executeSubfinder(domain, silent);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        if (typeof a.domain !== "string") throw new Error("domain must be a string");
+        return toolResult(await executeSubfinder(cleanDomain(a.domain), a.silent !== false));
       }
 
       case "dnsx": {
-        const { domains, recordType } = args as {
-          domains: string[];
-          recordType?: string;
-        };
-        const result = await executeDnsx(domains, recordType);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return toolResult(
+          await executeDnsx(cleanList(a.domains), a.recordType, cleanList(a.resolvers))
+        );
       }
 
       case "naabu": {
-        const { hosts, ports, topPorts } = args as {
-          hosts: string[];
-          ports?: string;
-          topPorts?: number;
-        };
-        const result = await executeNaabu(hosts, ports, topPorts);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        const scanType = a.scanType === "s" ? "s" : "c";
+        return toolResult(
+          await executeNaabu(cleanList(a.hosts), a.ports, a.topPorts, scanType)
+        );
       }
 
       case "httpx": {
-        const { urls, followRedirects, screenshot } = args as {
-          urls: string[];
-          followRedirects?: boolean;
-          screenshot?: boolean;
-        };
-        const result = await executeHttpx(urls, followRedirects, screenshot);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return toolResult(
+          await executeHttpx(cleanList(a.urls), !!a.followRedirects, !!a.techDetect)
+        );
       }
 
       case "katana": {
-        const { urls, depth, scope } = args as {
-          urls: string[];
-          depth?: number;
-          scope?: string;
-        };
-        const result = await executeKatana(urls, depth, scope);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return toolResult(
+          await executeKatana(cleanList(a.urls), a.depth ?? 2, a.scope, a.maxDurationSeconds)
+        );
       }
 
       case "nuclei": {
-        const { targets, templates, severity } = args as {
-          targets: string[];
-          templates?: string[];
-          severity?: string[];
-        };
-        const result = await executeNuclei(targets, templates, severity);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return toolResult(
+          await executeNuclei(cleanList(a.targets), a.templateIds, a.severity)
+        );
+      }
+
+      case "tlsx": {
+        return toolResult(await executeTlsx(cleanList(a.hosts), a.port ?? 443));
+      }
+
+      case "shuffledns": {
+        if (typeof a.domain !== "string" || typeof a.wordlist !== "string") {
+          throw new Error("domain and wordlist must be strings");
+        }
+        return toolResult(
+          await executeShuffledns(cleanDomain(a.domain), a.wordlist, cleanList(a.resolvers))
+        );
       }
 
       case "bug_bounty_workflow": {
-        const {
-          domain,
-          portScan,
-          crawl,
-          vulnerabilityScan,
-          severityFilter,
-          maxCrawlUrls,
-          maxScanUrls,
-          maxTopPorts,
-          batchSize,
-          delayBetweenBatches,
-          crawlDepth,
-        } = args as {
-          domain: string;
-          portScan?: boolean;
-          crawl?: boolean;
-          vulnerabilityScan?: boolean;
-          severityFilter?: string[];
-          maxCrawlUrls?: number;
-          maxScanUrls?: number;
-          maxTopPorts?: number;
-          batchSize?: number;
-          delayBetweenBatches?: number;
-          crawlDepth?: number;
-        };
-        const result = await runBugBountyWorkflow(domain, {
-          portScan: portScan ?? true,
-          crawl: crawl ?? true,
-          vulnerabilityScan: vulnerabilityScan ?? true,
-          severityFilter,
-          rateLimit: {
-            maxCrawlUrls,
-            maxScanUrls,
-            maxTopPorts,
-            batchSize,
-            delayBetweenBatches,
-            crawlDepth,
-          },
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
+        if (typeof a.domain !== "string") throw new Error("domain must be a string");
+        return toolResult(
+          await runBugBountyWorkflow(cleanDomain(a.domain), {
+            portScan: a.portScan ?? true,
+            crawl: a.crawl ?? true,
+            vulnerabilityScan: a.vulnerabilityScan ?? true,
+            severityFilter: a.severityFilter,
+            rateLimit: {
+              maxCrawlUrls: a.maxCrawlUrls,
+              maxScanUrls: a.maxScanUrls,
+              maxTopPorts: a.maxTopPorts,
+              batchSize: a.batchSize,
+              delayBetweenBatches: a.delayBetweenBatches,
+              crawlDepth: a.crawlDepth,
             },
-          ],
-        };
+          })
+        );
       }
 
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error executing ${name}: ${errorMessage}`,
-        },
-      ],
-      isError: true,
-    };
+    return toolError(name, error);
   }
 });
 

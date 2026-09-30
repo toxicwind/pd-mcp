@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { runBinary, parseJsonl, cleanList } from "./runner.js";
 
 export interface KatanaResult {
   endpoints: string[];
@@ -8,64 +8,27 @@ export interface KatanaResult {
 
 export async function executeKatana(
   urls: string[],
-  depth: number = 2,
-  scope?: string
+  depth = 2,
+  scope?: string,
+  maxDurationSeconds?: number
 ): Promise<KatanaResult> {
-  return new Promise((resolve) => {
-    const args = ["-d", depth.toString(), "-jsonl"];
-    if (scope) args.push("-f", scope);
-
-    const endpoints: string[] = [];
-    let errorOutput = "";
-
-    const process = spawn("katana", args);
-
-    // Feed URLs via stdin
-    process.stdin.write(urls.join("\n") + "\n");
-    process.stdin.end();
-
-    process.stdout.on("data", (data) => {
-      const lines = data.toString().split("\n").filter((line: string) => line.trim());
-      for (const line of lines) {
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.request && parsed.request.endpoint) {
-            endpoints.push(parsed.request.endpoint);
-          }
-        } catch (e) {
-          // If not JSON, treat as plain endpoint
-          if (line.trim() && line.startsWith("http")) {
-            endpoints.push(line.trim());
-          }
-        }
-      }
-    });
-
-    process.stderr.on("data", (data) => {
-      errorOutput += data.toString();
-    });
-
-    process.on("close", (code) => {
-      if (code !== 0 && endpoints.length === 0) {
-        resolve({
-          endpoints: [],
-          count: 0,
-          error: `katana exited with code ${code}: ${errorOutput}`,
-        });
-      } else {
-        resolve({
-          endpoints: [...new Set(endpoints)], // Remove duplicates
-          count: endpoints.length,
-        });
-      }
-    });
-
-    process.on("error", (err) => {
-      resolve({
-        endpoints: [],
-        count: 0,
-        error: `Failed to execute katana: ${err.message}. Make sure katana is installed.`,
-      });
-    });
+  const list = cleanList(urls, 100);
+  if (list.length === 0) return { endpoints: [], count: 0, error: "no valid urls" };
+  const d = Math.min(Math.max(Math.floor(depth) || 2, 1), 5);
+  const args = ["-d", String(d), "-jsonl", "-silent"];
+  if (scope) args.push("-f", scope);
+  if (maxDurationSeconds && maxDurationSeconds > 0) {
+    args.push("-ct", `${Math.min(maxDurationSeconds, 600)}s`);
+  }
+  const r = await runBinary("katana", args, {
+    timeoutMs: 600_000,
+    stdin: list.join("\n") + "\n",
   });
+  const endpoints = parseJsonl<string>(r.lines, (p) =>
+    p.request && p.request.endpoint ? String(p.request.endpoint) : null
+  );
+  if (r.exitCode !== 0 && endpoints.length === 0) {
+    return { endpoints: [], count: 0, error: `katana failed (exit ${r.exitCode}): ${r.stderr.slice(-2000)}` };
+  }
+  return { endpoints: [...new Set(endpoints)], count: endpoints.length };
 }

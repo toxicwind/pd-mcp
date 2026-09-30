@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { runBinary, parseJsonl, cleanList } from "./runner.js";
 
 export interface SubfinderResult {
   subdomains: string[];
@@ -8,57 +8,16 @@ export interface SubfinderResult {
 
 export async function executeSubfinder(
   domain: string,
-  silent: boolean = true
+  silent = true
 ): Promise<SubfinderResult> {
-  return new Promise((resolve) => {
-    const args = ["-d", domain, "-json"];
-    if (silent) args.push("-silent");
-
-    const subdomains: string[] = [];
-    let errorOutput = "";
-
-    const process = spawn("subfinder", args);
-
-    process.stdout.on("data", (data) => {
-      const lines = data.toString().split("\n").filter((line: string) => line.trim());
-      for (const line of lines) {
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.host) {
-            subdomains.push(parsed.host);
-          }
-        } catch (e) {
-          // If not JSON, treat as plain subdomain
-          if (line.trim()) subdomains.push(line.trim());
-        }
-      }
-    });
-
-    process.stderr.on("data", (data) => {
-      errorOutput += data.toString();
-    });
-
-    process.on("close", (code) => {
-      if (code !== 0 && subdomains.length === 0) {
-        resolve({
-          subdomains: [],
-          count: 0,
-          error: `subfinder exited with code ${code}: ${errorOutput}`,
-        });
-      } else {
-        resolve({
-          subdomains: [...new Set(subdomains)], // Remove duplicates
-          count: subdomains.length,
-        });
-      }
-    });
-
-    process.on("error", (err) => {
-      resolve({
-        subdomains: [],
-        count: 0,
-        error: `Failed to execute subfinder: ${err.message}. Make sure subfinder is installed.`,
-      });
-    });
-  });
+  const args = ["-d", domain, "-json"];
+  if (silent) args.push("-silent");
+  const r = await runBinary("subfinder", args, { timeoutMs: 300_000 });
+  const subs = parseJsonl<string>(r.lines, (p) =>
+    typeof p.host === "string" && p.host ? p.host : null
+  );
+  if (r.exitCode !== 0 && subs.length === 0) {
+    return { subdomains: [], count: 0, error: `subfinder failed (exit ${r.exitCode}): ${r.stderr.slice(-2000)}` };
+  }
+  return { subdomains: [...new Set(subs)], count: subs.length };
 }

@@ -1,73 +1,40 @@
-import { spawn } from "child_process";
+import { runBinary, cleanList } from "./runner.js";
 
 export interface DnsxResult {
-  resolved: Array<{ domain: string; ip: string; type?: string }>;
+  resolved: Array<{ domain: string; ip: string; type: string }>;
   count: number;
   error?: string;
 }
 
 export async function executeDnsx(
   domains: string[],
-  recordType?: string
+  recordType?: string,
+  resolvers?: string[]
 ): Promise<DnsxResult> {
-  return new Promise((resolve) => {
-    const args = ["-json"];
-    if (recordType) args.push("-a", recordType);
-
-    const resolved: Array<{ domain: string; ip: string; type?: string }> = [];
-    let errorOutput = "";
-
-    const process = spawn("dnsx", args);
-
-    // Feed domains via stdin
-    process.stdin.write(domains.join("\n") + "\n");
-    process.stdin.end();
-
-    process.stdout.on("data", (data) => {
-      const lines = data.toString().split("\n").filter((line: string) => line.trim());
-      for (const line of lines) {
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.host && parsed.a) {
-            for (const ip of parsed.a) {
-              resolved.push({
-                domain: parsed.host,
-                ip: ip,
-                type: "A",
-              });
-            }
-          }
-        } catch (e) {
-          // Skip unparseable lines
-        }
-      }
-    });
-
-    process.stderr.on("data", (data) => {
-      errorOutput += data.toString();
-    });
-
-    process.on("close", (code) => {
-      if (code !== 0 && resolved.length === 0) {
-        resolve({
-          resolved: [],
-          count: 0,
-          error: `dnsx exited with code ${code}: ${errorOutput}`,
-        });
-      } else {
-        resolve({
-          resolved,
-          count: resolved.length,
-        });
-      }
-    });
-
-    process.on("error", (err) => {
-      resolve({
-        resolved: [],
-        count: 0,
-        error: `Failed to execute dnsx: ${err.message}. Make sure dnsx is installed.`,
-      });
-    });
+  const list = cleanList(domains);
+  if (list.length === 0) return { resolved: [], count: 0, error: "no valid domains" };
+  const args = ["-json", "-silent"];
+  if (recordType) args.push("-a", recordType);
+  if (resolvers && resolvers.length > 0) args.push("-r", resolvers.join(","));
+  const r = await runBinary("dnsx", args, {
+    timeoutMs: 300_000,
+    stdin: list.join("\n") + "\n",
   });
+  const resolved: Array<{ domain: string; ip: string; type: string }> = [];
+  const seen = new Set<string>();
+  for (const line of r.lines) {
+    let p: any;
+    try { p = JSON.parse(line); } catch { continue; }
+    if (!p.host || !Array.isArray(p.a)) continue;
+    for (const ip of p.a) {
+      const key = `${p.host}|${ip}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      resolved.push({ domain: p.host, ip: String(ip), type: "A" });
+    }
+  }
+  if (r.exitCode !== 0 && resolved.length === 0) {
+    return { resolved: [], count: 0, error: `dnsx failed (exit ${r.exitCode}): ${r.stderr.slice(-2000)}` };
+  }
+  return { resolved, count: resolved.length };
 }
