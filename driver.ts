@@ -3,8 +3,9 @@
 // on any failure.
 import { spawn } from "child_process";
 
+const DIR = import.meta.dir;
 const server = spawn("bun", ["src/index.ts"], {
-  cwd: "/home/toxic/pd-mcp-kestrel",
+  cwd: DIR,
   stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -83,7 +84,7 @@ async function main() {
     ["katana", { urls: ["https://example.com"], depth: 2, maxDurationSeconds: 60 }, (p) => Array.isArray(p?.endpoints)],
     ["nuclei", { targets: ["https://example.com"], templateIds: ["http-missing-security-headers"], severity: ["info"], confirm: true }, (p) => Array.isArray(p?.vulnerabilities)],
     ["tlsx", { hosts: ["example.com"], port: 443 }, (p) => Array.isArray(p?.hosts) && p.hosts.length > 0],
-    ["shuffledns", { domain: "example.com", wordlist: "/home/toxic/pd-mcp-kestrel/wordlist.txt" }, (p) => Array.isArray(p?.subdomains)],
+    ["shuffledns", { domain: "example.com", wordlist: `${DIR}/wordlist.txt` }, (p) => Array.isArray(p?.subdomains)],
   ];
 
   for (const [tool, args, check] of calls) {

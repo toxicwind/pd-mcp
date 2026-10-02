@@ -15,7 +15,23 @@ import { executeNuclei } from "./tools/nuclei.js";
 import { executeTlsx } from "./tools/tlsx.js";
 import { executeShuffledns } from "./tools/shuffledns.js";
 import { runBugBountyWorkflow } from "./workflows/bug-bounty.js";
-import { cleanDomain, cleanList, withHeavyGate, checkAllBinaries } from "./tools/runner.js";
+import { cleanDomain, cleanList, cleanPortSpec, withHeavyGate, checkAllBinaries } from "./tools/runner.js";
+
+function toList(input: unknown): string[] {
+  if (Array.isArray(input)) return cleanList(input);
+  if (typeof input === "string") {
+    const s = input.trim();
+    if (!s) return [];
+    return s.includes(",") ? cleanList(s.split(",")) : cleanList([s]);
+  }
+  return [];
+}
+
+function sanitizeDomain(d: unknown): string {
+  let s = String(d ?? "").trim().toLowerCase();
+  s = s.replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+  return cleanDomain(s);
+}
 
 // ProjectDiscovery MCP server — estate-hardened fork of
 // intelligent-ears/pd-tools-mcp (MIT).
@@ -51,8 +67,7 @@ function toolError(name: string, err: unknown) {
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
+  const baseTools = [
       {
         name: "subfinder",
         description: "Discover subdomains for a given domain using passive sources",
@@ -180,82 +195,110 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["domain"],
         },
       },
-    ],
-  };
+    ];
+  const allTools = baseTools.flatMap((t) => [
+    t,
+    {
+      ...t,
+      name: `pd_${t.name}`,
+      description: `[Alias for ${t.name}] ${t.description}`,
+    },
+  ]);
+  return { tools: allTools };
 });
 
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  const { name: rawName, arguments: args } = request.params;
+  const name = rawName.startsWith("pd_") ? rawName.slice(3) : rawName;
   const a = (args ?? {}) as Record<string, any>;
 
   try {
     switch (name) {
       case "subfinder": {
-        if (typeof a.domain !== "string") throw new Error("domain must be a string");
-        return toolResult(await executeSubfinder(cleanDomain(a.domain), a.silent !== false));
+        const domain = sanitizeDomain(a.domain ?? a.target);
+        return toolResult(await executeSubfinder(domain, a.silent !== false));
       }
 
       case "dnsx": {
-        return toolResult(
-          await executeDnsx(cleanList(a.domains), a.recordType, cleanList(a.resolvers))
-        );
+        const domains = toList(a.domains ?? a.target ?? a.domain);
+        if (domains.length === 0) throw new Error("target, domain, or domains must be provided");
+        const recordType = a.recordType ?? (Array.isArray(a.types) ? a.types.join(",") : a.types);
+        const resolvers = toList(a.resolvers ?? a.resolver);
+        return toolResult(await executeDnsx(domains, recordType, resolvers));
       }
 
       case "naabu": {
+        const hosts = toList(a.hosts ?? a.target ?? a.host);
+        if (hosts.length === 0) throw new Error("target, host, or hosts must be provided");
         const scanType = a.scanType === "s" ? "s" : "c";
+        const ports = cleanPortSpec(a.ports);
+        const topPorts = a.topPorts ?? a.top_ports;
         return toolResult(
           await withHeavyGate("naabu", () =>
-            executeNaabu(cleanList(a.hosts), a.ports, a.topPorts, scanType)
+            executeNaabu(hosts, ports, topPorts, scanType)
           )
         );
       }
 
       case "httpx": {
+        const urls = toList(a.urls ?? a.target ?? a.url);
+        if (urls.length === 0) throw new Error("target, url, or urls must be provided");
+        const followRedirects = !!(a.followRedirects ?? a.follow_redirects ?? false);
+        const techDetect = a.techDetect ?? a.tech_detect ?? a.include_title ?? true;
         return toolResult(
-          await executeHttpx(cleanList(a.urls), !!a.followRedirects, !!a.techDetect)
+          await executeHttpx(urls, followRedirects, !!techDetect)
         );
       }
 
       case "katana": {
+        const urls = toList(a.urls ?? a.target ?? a.url);
+        if (urls.length === 0) throw new Error("target, url, or urls must be provided");
         return toolResult(
-          await executeKatana(cleanList(a.urls), a.depth ?? 2, a.scope, a.maxDurationSeconds)
+          await executeKatana(urls, a.depth ?? 2, a.scope, a.maxDurationSeconds ?? a.timeout_sec)
         );
       }
 
       case "nuclei": {
-        // Destructive gate (grafted from estate pd-mcp): explicit opt-in required.
         if (a.confirm !== true) {
           throw new Error(
             "nuclei is destructive-gated: pass confirm:true to actually scan."
           );
         }
+        const targets = toList(a.targets ?? a.target);
+        if (targets.length === 0) throw new Error("target or targets must be provided");
+        const templateIds = toList(a.templateIds ?? a.templates ?? a.template);
+        const severity = Array.isArray(a.severity) ? a.severity : (typeof a.severity === "string" ? a.severity.split(",") : undefined);
         return toolResult(
           await withHeavyGate("nuclei", () =>
-            executeNuclei(cleanList(a.targets), a.templateIds, a.severity)
+            executeNuclei(targets, templateIds, severity)
           )
         );
       }
 
       case "tlsx": {
-        return toolResult(await executeTlsx(cleanList(a.hosts), a.port ?? 443));
+        const hosts = toList(a.hosts ?? a.target ?? a.host);
+        if (hosts.length === 0) throw new Error("target, host, or hosts must be provided");
+        return toolResult(await executeTlsx(hosts, a.port ?? 443));
       }
 
       case "shuffledns": {
-        if (typeof a.domain !== "string" || typeof a.wordlist !== "string") {
-          throw new Error("domain and wordlist must be strings");
+        const domain = sanitizeDomain(a.domain ?? a.target);
+        if (typeof a.wordlist !== "string") {
+          throw new Error("wordlist must be a string");
         }
+        const resolvers = toList(a.resolvers ?? a.resolver);
         return toolResult(
           await withHeavyGate("shuffledns", () =>
-            executeShuffledns(cleanDomain(a.domain), a.wordlist, cleanList(a.resolvers))
+            executeShuffledns(domain, a.wordlist, resolvers)
           )
         );
       }
 
       case "bug_bounty_workflow": {
-        if (typeof a.domain !== "string") throw new Error("domain must be a string");
+        const domain = sanitizeDomain(a.domain ?? a.target);
         return toolResult(
-          await runBugBountyWorkflow(cleanDomain(a.domain), {
+          await runBugBountyWorkflow(domain, {
             portScan: a.portScan ?? true,
             crawl: a.crawl ?? true,
             vulnerabilityScan: a.vulnerabilityScan ?? true,
@@ -273,7 +316,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       default:
-        throw new Error(`Unknown tool: ${name}`);
+        throw new Error(`Unknown tool: ${rawName}`);
     }
   } catch (error) {
     return toolError(name, error);

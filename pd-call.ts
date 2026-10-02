@@ -3,7 +3,8 @@ import { spawn } from "child_process";
 const [tool, argsJson] = process.argv.slice(2);
 if (!tool) { console.error("usage: bun pd-call.ts <tool> '<json>'"); process.exit(2); }
 const server = spawn("bun", ["src/index.ts"], {
-  cwd: "/home/toxic/pd-mcp-kestrel",
+   cwd: import.meta.dir,
+ server.kill(); process.exit(0);
   stdio: ["pipe", "pipe", "inherit"],
   env: { ...process.env, PD_TOOLS_DIR: "/home/toxic/.pdtm/go/bin" },
 });
@@ -30,4 +31,5 @@ await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clien
 notify("notifications/initialized");
 const r = await rpc("tools/call", { name: tool, arguments: JSON.parse(argsJson || "{}") });
 console.log(JSON.stringify(r.result, null, 2).slice(0, 30000));
-server.kill();
+   cwd: import.meta.dir,
+ server.kill(); process.exit(0);
