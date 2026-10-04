@@ -29,4 +29,4 @@ jobs:
         run: test -x build/index.js && echo "build OK"
 
       - name: Smoke test — pure functions (no PD binaries needed)
-        run: bun test/runner-pure.test.ts
+        run: bun test test/runner-pure.test.ts
